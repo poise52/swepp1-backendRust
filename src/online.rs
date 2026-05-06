@@ -116,6 +116,8 @@ struct MatchRow {
 #[derive(Debug, Serialize)]
 pub struct LobbyResponse {
     pub id: String,
+    #[serde(rename = "ownerId")]
+    pub owner_id: String,
     #[serde(rename = "inviteCode")]
     pub invite_code: String,
     #[serde(rename = "inviteLink")]
@@ -297,6 +299,76 @@ pub async fn get_lobby(
     Path(lobby_id): Path<String>,
 ) -> Result<Json<LobbyResponse>, ApiError> {
     Ok(Json(get_lobby_response(&state, &lobby_id).await?))
+}
+
+pub async fn get_active_match(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(lobby_id): Path<String>,
+) -> Result<Json<StartMatchResponse>, ApiError> {
+    let user_id = required_user_id(&headers, &state.jwt_secret)?;
+    let in_lobby: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM online_lobby_players WHERE "lobbyId" = $1 AND "userId" = $2"#,
+    )
+    .bind(&lobby_id)
+    .bind(&user_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(internal_error)?;
+    if in_lobby == 0 {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "Not in this lobby"));
+    }
+
+    let m = sqlx::query_as::<_, MatchRow>(
+        r#"
+        SELECT id, "lobbyId", "player1Id", "player2Id", "player1GameId", "player2GameId", seed, mode, "algorithmVersion", status
+        FROM online_matches
+        WHERE "lobbyId" = $1 AND status = 'active'
+        LIMIT 1
+        "#,
+    )
+    .bind(&lobby_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_error)?;
+
+    let Some(m) = m else {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "No active match"));
+    };
+
+    if m.player1_id != user_id && m.player2_id != user_id {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "Not in this match"));
+    }
+
+    let lobby = get_lobby_row(&state, &lobby_id).await?;
+
+    let response = if m.player1_id == user_id {
+        StartMatchResponse {
+            match_id: m.id.clone(),
+            my_game_id: m.player1_game_id.clone(),
+            opponent_game_id: m.player2_game_id.clone(),
+            seed: m.seed,
+            rows: lobby.rows,
+            cols: lobby.cols,
+            mines: lobby.mines,
+            mode: m.mode.clone(),
+            algorithm_version: m.algorithm_version,
+        }
+    } else {
+        StartMatchResponse {
+            match_id: m.id.clone(),
+            my_game_id: m.player2_game_id.clone(),
+            opponent_game_id: m.player1_game_id.clone(),
+            seed: m.seed,
+            rows: lobby.rows,
+            cols: lobby.cols,
+            mines: lobby.mines,
+            mode: m.mode.clone(),
+            algorithm_version: m.algorithm_version,
+        }
+    };
+
+    Ok(Json(response))
 }
 
 pub async fn set_ready(
@@ -794,6 +866,7 @@ async fn get_lobby_response(state: &AppState, lobby_id: &str) -> Result<LobbyRes
     let players = get_lobby_players(state, lobby_id).await?;
     Ok(LobbyResponse {
         id: lobby.id,
+        owner_id: lobby.owner_id,
         invite_code: lobby.invite_code,
         invite_link: lobby.invite_link,
         mode: lobby.mode,

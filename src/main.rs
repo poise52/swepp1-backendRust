@@ -30,9 +30,9 @@ use crate::minesweeper::{
     create_game, delete_game, ensure_minesweeper_schema, get_game, mark_cell, reveal_cell,
 };
 use crate::online::{
-    create_lobby, ensure_online_schema, finish_match, get_lobby, get_opponent_state, join_lobby,
-    patch_lobby_settings, prepare_lobby_next_round, set_ready, start_lobby_match, submit_match_move,
-    ws_lobby,
+    create_lobby, ensure_online_schema, finish_match, get_active_match, get_lobby, get_opponent_state,
+    join_lobby, patch_lobby_settings, prepare_lobby_next_round, set_ready, start_lobby_match,
+    submit_match_move, ws_lobby,
 };
 use crate::state::{AppState, RateLimitState};
 
@@ -116,6 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/lobbies", post(create_lobby))
         .route("/lobbies/join", post(join_lobby))
         .route("/lobbies/:lobbyId", get(get_lobby))
+        .route("/lobbies/:lobbyId/active-match", get(get_active_match))
         .route("/lobbies/:lobbyId/settings", patch(patch_lobby_settings))
         .route("/lobbies/:lobbyId/next-round", post(prepare_lobby_next_round))
         .route("/lobbies/:lobbyId/ready", post(set_ready))
