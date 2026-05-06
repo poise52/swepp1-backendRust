@@ -2,7 +2,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use bcrypt::{hash, verify, DEFAULT_COST};
-use chrono::{NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::FromRow;
@@ -42,7 +42,18 @@ pub struct UserPublic {
     pub world_rank: i64,
     #[sqlx(rename = "createdAt")]
     #[serde(rename = "createdAt")]
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow)]
+struct InsertedUser {
+    pub id: String,
+    pub username: String,
+    pub email: String,
+    #[sqlx(rename = "ratingPts")]
+    pub rating_pts: i32,
+    #[sqlx(rename = "createdAt")]
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, FromRow)]
@@ -54,7 +65,7 @@ struct UserWithPassword {
     #[sqlx(rename = "ratingPts")]
     pub rating_pts: i32,
     #[sqlx(rename = "createdAt")]
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize, Validate)]
@@ -98,7 +109,7 @@ pub struct GameRecord {
     pub won: bool,
     #[sqlx(rename = "createdAt")]
     #[serde(rename = "createdAt")]
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -116,7 +127,7 @@ pub struct GameRecordWithUser {
     pub won: bool,
     #[sqlx(rename = "createdAt")]
     #[serde(rename = "createdAt")]
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
     pub user: serde_json::Value,
 }
 
@@ -169,11 +180,11 @@ pub async fn register(
     let hashed_password = hash(&payload.password, DEFAULT_COST).map_err(internal_error)?;
     let user_id = Uuid::new_v4().to_string();
 
-    let user = sqlx::query_as::<_, UserPublic>(
+    let inserted = sqlx::query_as::<_, InsertedUser>(
         r#"
         INSERT INTO users (id, username, email, password, "ratingPts", "updatedAt")
         VALUES ($1, $2, $3, $4, 0, NOW())
-        RETURNING id, username, email, "ratingPts", (0)::bigint AS "world_rank", "createdAt"
+        RETURNING id, username, email, "ratingPts", "createdAt"
         "#,
     )
     .bind(&user_id)
@@ -184,10 +195,14 @@ pub async fn register(
     .await
     .map_err(internal_error)?;
 
-    let world_rank = fetch_world_rank(&state, &user.id, user.rating_pts).await?;
+    let world_rank = fetch_world_rank(&state, &inserted.id, inserted.rating_pts).await?;
     let user = UserPublic {
+        id: inserted.id,
+        username: inserted.username,
+        email: inserted.email,
+        rating_pts: inserted.rating_pts,
         world_rank,
-        ..user
+        created_at: inserted.created_at,
     };
 
     let token = generate_token(&user.id.to_string(), &state.jwt_secret, state.jwt_exp_seconds)?;
