@@ -173,7 +173,7 @@ pub async fn register(
         r#"
         INSERT INTO users (id, username, email, password, "ratingPts", "updatedAt")
         VALUES ($1, $2, $3, $4, 0, NOW())
-        RETURNING id, username, email, "ratingPts", 0 as "world_rank", "createdAt"
+        RETURNING id, username, email, "ratingPts", (0)::bigint AS "world_rank", "createdAt"
         "#,
     )
     .bind(&user_id)
