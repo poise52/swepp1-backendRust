@@ -3,6 +3,7 @@ mod config;
 mod errors;
 mod handlers;
 mod middleware;
+mod minesweeper;
 mod state;
 
 use std::net::SocketAddr;
@@ -22,6 +23,9 @@ use crate::handlers::{
     register,
 };
 use crate::middleware::rate_limit;
+use crate::minesweeper::{
+    create_game, delete_game, ensure_minesweeper_schema, get_game, mark_cell, reveal_cell,
+};
 use crate::state::{AppState, RateLimitState};
 
 #[tokio::main]
@@ -43,6 +47,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(err) = ensure_schema_extensions(&state).await {
         return Err(std::io::Error::other(err.body.to_string()).into());
     }
+    if let Err(err) = ensure_minesweeper_schema(&state).await {
+        return Err(std::io::Error::other(err.body.to_string()).into());
+    }
 
     let mut origins = vec![
         HeaderValue::from_static("http://localhost:5173"),
@@ -55,7 +62,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let cors = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::ACCEPT])
         .allow_credentials(true)
         .allow_origin(origins);
@@ -68,11 +80,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let records_routes = Router::new()
         .route("/", post(create_record).get(get_records))
         .route("/user/:userId", get(get_user_records));
+    let minesweeper_routes = Router::new()
+        .route("/games", post(create_game))
+        .route("/games/:gameId", get(get_game).delete(delete_game))
+        .route("/games/:gameId/reveal", post(reveal_cell))
+        .route("/games/:gameId/mark", post(mark_cell));
 
     let app = Router::new()
         .route("/health", get(health))
         .nest("/api/auth", auth_routes)
         .nest("/api/records", records_routes)
+        .nest("/api/minesweeper", minesweeper_routes)
         .layer(from_fn_with_state(state.clone(), rate_limit))
         .layer(cors)
         .with_state(state);
