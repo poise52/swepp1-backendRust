@@ -30,17 +30,15 @@ pub struct LoginRequest {
     pub password: String,
 }
 
-#[derive(Debug, Serialize, FromRow, Clone)]
+#[derive(Debug, Serialize, Clone)]
 pub struct UserPublic {
     pub id: String,
     pub username: String,
     pub email: String,
-    #[sqlx(rename = "ratingPts")]
     #[serde(rename = "ratingPts")]
     pub rating_pts: i32,
     #[serde(rename = "worldRank")]
     pub world_rank: i64,
-    #[sqlx(rename = "createdAt")]
     #[serde(rename = "createdAt")]
     pub created_at: DateTime<Utc>,
 }
@@ -546,7 +544,7 @@ fn extract_user_id(headers: &HeaderMap, jwt_secret: &str) -> Result<String, ApiE
 async fn fetch_world_rank(state: &AppState, user_id: &str, rating_pts: i32) -> Result<i64, ApiError> {
     let higher_count = sqlx::query_scalar::<_, i64>(
         r#"
-        SELECT COUNT(*) FROM users
+        SELECT (COUNT(*))::BIGINT FROM users
         WHERE "ratingPts" > $1
            OR ("ratingPts" = $1 AND id < $2)
         "#,
