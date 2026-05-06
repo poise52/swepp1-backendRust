@@ -54,6 +54,15 @@ pub struct FinishMatchRequest {
     pub winner_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchLobbyRequest {
+    pub rows: Option<i32>,
+    pub cols: Option<i32>,
+    pub mines: Option<i32>,
+    pub seed: Option<i32>,
+}
+
 #[derive(Debug, Serialize, FromRow, Clone)]
 struct LobbyRow {
     pub id: String,
@@ -453,12 +462,20 @@ pub async fn finish_match(
     if match_row.player1_id != user_id && match_row.player2_id != user_id {
         return Err(ApiError::new(StatusCode::FORBIDDEN, "Not in match"));
     }
+    if payload.winner_id != match_row.player1_id && payload.winner_id != match_row.player2_id {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "winnerId must be a match player"));
+    }
 
-    sqlx::query(r#"UPDATE online_matches SET status = 'finished' WHERE id = $1"#)
+    let rows_updated = sqlx::query(r#"UPDATE online_matches SET status = 'finished' WHERE id = $1 AND status = 'active'"#)
         .bind(&match_id)
         .execute(&state.db)
         .await
-        .map_err(internal_error)?;
+        .map_err(internal_error)?
+        .rows_affected();
+
+    if rows_updated == 0 {
+        return Ok(StatusCode::NO_CONTENT);
+    }
 
     if match_row.mode == "ranked" {
         let loser_id = if payload.winner_id == match_row.player1_id {
@@ -487,6 +504,101 @@ pub async fn finish_match(
     .await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn patch_lobby_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(lobby_id): Path<String>,
+    Json(patch): Json<PatchLobbyRequest>,
+) -> Result<Json<LobbyResponse>, ApiError> {
+    let user_id = required_user_id(&headers, &state.jwt_secret)?;
+    let lobby = get_lobby_row(&state, &lobby_id).await?;
+    if lobby.owner_id != user_id {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "Only host can edit lobby settings"));
+    }
+    if lobby.status != "lobby" {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "Edit settings between matches while the lobby is idle",
+        ));
+    }
+
+    let rows = patch.rows.unwrap_or(lobby.rows);
+    let cols = patch.cols.unwrap_or(lobby.cols);
+    let mines = patch.mines.unwrap_or(lobby.mines);
+    validate_params(rows, cols, mines)?;
+
+    let seed = if lobby.mode == "ranked" {
+        derive_ranked_seed(&lobby_id)
+    } else {
+        patch.seed.unwrap_or(lobby.seed)
+    };
+
+    sqlx::query(
+        r#"UPDATE online_lobbies SET rows = $2, cols = $3, mines = $4, seed = $5, "updatedAt" = NOW() WHERE id = $1"#,
+    )
+    .bind(&lobby_id)
+    .bind(rows)
+    .bind(cols)
+    .bind(mines)
+    .bind(seed)
+    .execute(&state.db)
+    .await
+    .map_err(internal_error)?;
+
+    let lobby_updated = get_lobby_response(&state, &lobby_id).await?;
+    broadcast_lobby_event(&state, &lobby_id, "lobby_updated", &lobby_updated).await?;
+    Ok(Json(lobby_updated))
+}
+
+pub async fn prepare_lobby_next_round(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(lobby_id): Path<String>,
+) -> Result<Json<LobbyResponse>, ApiError> {
+    let user_id = required_user_id(&headers, &state.jwt_secret)?;
+    let in_lobby: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM online_lobby_players WHERE "lobbyId" = $1 AND "userId" = $2"#,
+    )
+    .bind(&lobby_id)
+    .bind(&user_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(internal_error)?;
+    if in_lobby == 0 {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "Not in this lobby"));
+    }
+
+    let active: Option<String> = sqlx::query_scalar(
+        r#"SELECT id FROM online_matches WHERE "lobbyId" = $1 AND status = 'active' LIMIT 1"#,
+    )
+    .bind(&lobby_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_error)?;
+    if active.is_some() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "Match still in progress",
+        ));
+    }
+
+    sqlx::query(r#"UPDATE online_lobbies SET status = 'lobby', "updatedAt" = NOW() WHERE id = $1"#)
+        .bind(&lobby_id)
+        .execute(&state.db)
+        .await
+        .map_err(internal_error)?;
+
+    sqlx::query(r#"UPDATE online_lobby_players SET ready = false WHERE "lobbyId" = $1"#)
+        .bind(&lobby_id)
+        .execute(&state.db)
+        .await
+        .map_err(internal_error)?;
+
+    let lobby = get_lobby_response(&state, &lobby_id).await?;
+    broadcast_lobby_event(&state, &lobby_id, "lobby_updated", &lobby).await?;
+    Ok(Json(lobby))
 }
 
 pub async fn get_opponent_state(
@@ -527,11 +639,10 @@ pub async fn ws_lobby(
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let token = q.get("token").cloned().unwrap_or_default();
-    let is_valid = verify_token(&token, &state.jwt_secret).is_some();
-    if !is_valid {
+    let Some(claims) = verify_token(&token, &state.jwt_secret) else {
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
-    }
-    ws.on_upgrade(move |socket| ws_client(socket, state, lobby_id))
+    };
+    ws.on_upgrade(move |socket| ws_client(socket, state, lobby_id, claims.user_id))
 }
 
 pub async fn ensure_online_schema(state: &AppState) -> Result<(), ApiError> {
@@ -615,9 +726,12 @@ pub async fn ensure_online_schema(state: &AppState) -> Result<(), ApiError> {
     Ok(())
 }
 
-async fn ws_client(socket: WebSocket, state: AppState, lobby_id: String) {
+async fn ws_client(socket: WebSocket, state: AppState, lobby_id: String, user_id: String) {
     let mut rx = subscribe_lobby_channel(&state, &lobby_id).await;
     let (mut sender, mut receiver) = socket.split();
+    let state_for_dc = state.clone();
+    let lobby_dc = lobby_id.clone();
+    let uid_dc = user_id.clone();
 
     let send_task = tokio::spawn(async move {
         while let Ok(event) = rx.recv().await {
@@ -637,6 +751,9 @@ async fn ws_client(socket: WebSocket, state: AppState, lobby_id: String) {
                 break;
             }
         }
+        let _ =
+            broadcast_lobby_event(&state_for_dc, &lobby_dc, "player_disconnected", &json!({ "userId": uid_dc }))
+                .await;
     });
 
     let _ = tokio::join!(send_task, recv_task);

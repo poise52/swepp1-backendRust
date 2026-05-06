@@ -9,7 +9,7 @@ use sqlx::{FromRow, Row};
 use uuid::Uuid;
 use validator::Validate;
 
-use crate::auth::{generate_token, verify_token};
+use crate::auth::{effective_role, generate_token, verify_token};
 use crate::errors::{ApiError, HealthResponse};
 use crate::state::AppState;
 
@@ -39,6 +39,7 @@ pub struct UserPublic {
     pub rating_pts: i32,
     #[serde(rename = "worldRank")]
     pub world_rank: i64,
+    pub role: String,
     #[serde(rename = "createdAt")]
     pub created_at: DateTime<Utc>,
 }
@@ -62,6 +63,7 @@ struct UserWithPassword {
     pub password: String,
     #[sqlx(rename = "ratingPts")]
     pub rating_pts: i32,
+    pub role: String,
     #[sqlx(rename = "createdAt")]
     pub created_at: DateTime<Utc>,
 }
@@ -195,15 +197,16 @@ pub async fn register(
 
     let world_rank = fetch_world_rank(&state, &inserted.id, inserted.rating_pts).await?;
     let user = UserPublic {
-        id: inserted.id,
+        id: inserted.id.clone(),
         username: inserted.username,
         email: inserted.email,
         rating_pts: inserted.rating_pts,
         world_rank,
+        role: "user".to_string(),
         created_at: inserted.created_at,
     };
 
-    let token = generate_token(&user.id.to_string(), &state.jwt_secret, state.jwt_exp_seconds)?;
+    let token = generate_token(&user.id, "user", &state.jwt_secret, state.jwt_exp_seconds)?;
 
     Ok((StatusCode::CREATED, Json(AuthResponse { user, token })))
 }
@@ -221,7 +224,7 @@ pub async fn login(
 
     let user = sqlx::query_as::<_, UserWithPassword>(
         r#"
-        SELECT id, username, email, password, "ratingPts", "createdAt"
+        SELECT id, username, email, password, "ratingPts", role, "createdAt"
         FROM users
         WHERE email = $1
         "#,
@@ -240,7 +243,8 @@ pub async fn login(
         ));
     }
 
-    let token = generate_token(&user.id.to_string(), &state.jwt_secret, state.jwt_exp_seconds)?;
+    let role = effective_role(&user.role);
+    let token = generate_token(&user.id, role, &state.jwt_secret, state.jwt_exp_seconds)?;
 
     let world_rank = fetch_world_rank(&state, &user.id, user.rating_pts).await?;
     let user_public = UserPublic {
@@ -249,6 +253,7 @@ pub async fn login(
         email: user.email,
         rating_pts: user.rating_pts,
         world_rank,
+        role: role.to_string(),
         created_at: user.created_at,
     };
 
@@ -270,7 +275,7 @@ pub async fn get_current_user(
 
     let user = sqlx::query_as::<_, UserWithPassword>(
         r#"
-        SELECT id, username, email, password, "ratingPts", "createdAt"
+        SELECT id, username, email, password, "ratingPts", role, "createdAt"
         FROM users
         WHERE id = $1
         "#,
@@ -282,6 +287,7 @@ pub async fn get_current_user(
     .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "User not found"))?;
 
     let world_rank = fetch_world_rank(&state, &user.id, user.rating_pts).await?;
+    let role = effective_role(&user.role).to_string();
 
     Ok(Json(UserPublic {
         id: user.id,
@@ -289,6 +295,7 @@ pub async fn get_current_user(
         email: user.email,
         rating_pts: user.rating_pts,
         world_rank,
+        role,
         created_at: user.created_at,
     }))
 }
@@ -495,6 +502,16 @@ pub async fn ensure_schema_extensions(state: &AppState) -> Result<(), ApiError> 
         r#"
         ALTER TABLE users
         ADD COLUMN IF NOT EXISTS "ratingPts" INTEGER NOT NULL DEFAULT 0
+        "#,
+    )
+    .execute(&state.db)
+    .await
+    .map_err(internal_error)?;
+
+    sqlx::query(
+        r#"
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'
         "#,
     )
     .execute(&state.db)

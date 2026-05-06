@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
-use crate::auth::verify_token;
+use crate::auth::{bearer_claims, effective_role, role_allows_client_dev, verify_token};
 use crate::errors::ApiError;
 use crate::state::AppState;
 
@@ -118,12 +118,20 @@ pub async fn create_game(
 
     let user_id = optional_user_id(&headers, &state.jwt_secret);
     let seed = payload.seed.unwrap_or_else(|| (Utc::now().timestamp_millis() % 1_000_000) as i32);
-    let settings = payload.settings.unwrap_or(GameSettingsDto {
+    let mut settings = payload.settings.unwrap_or(GameSettingsDto {
         field_generation: "safe-start".to_string(),
         show_question_marks: true,
         enable_chord: true,
         dev_mode: false,
     });
+    if settings.dev_mode {
+        let allow = bearer_claims(&headers, &state.jwt_secret)
+            .map(|c| role_allows_client_dev(effective_role(&c.role)))
+            .unwrap_or(false);
+        if !allow {
+            settings.dev_mode = false;
+        }
+    }
 
     let mut board = create_empty_board(payload.rows, payload.cols);
     place_mines_initial(&mut board, payload.rows, payload.cols, payload.mines, seed);
@@ -150,12 +158,14 @@ pub async fn create_game(
     .await
     .map_err(internal_error)?;
 
-    build_state_response(row, settings.dev_mode)
+    let dev_visual = jwt_allows_dev(&headers, &state.jwt_secret) && settings.dev_mode;
+    build_state_response(row, dev_visual)
         .map(|r| (StatusCode::CREATED, Json(r)))
 }
 
 pub async fn reveal_cell(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(game_id): Path<String>,
     Json(payload): Json<CellActionRequest>,
 ) -> Result<Json<GameStateResponse>, ApiError> {
@@ -165,8 +175,9 @@ pub async fn reveal_cell(
     let mut status = parse_status(&row.game_status);
     let mut started_at = row.started_at;
 
+    let dev_visual = resolved_dev_visual(&headers, &state.jwt_secret, settings.dev_mode);
     if status == GameStatus::Won || status == GameStatus::Lost {
-        return build_state_response(row, settings.dev_mode).map(Json);
+        return build_state_response(row, dev_visual).map(Json);
     }
     if payload.row < 0 || payload.col < 0 || payload.row >= row.rows || payload.col >= row.cols {
         return Err(ApiError::new(StatusCode::BAD_REQUEST, "Invalid cell"));
@@ -198,11 +209,12 @@ pub async fn reveal_cell(
 
     persist_game(&state, &game_id, &board, status, started_at).await?;
     row = fetch_game(&state, &game_id).await?;
-    build_state_response(row, settings.dev_mode).map(Json)
+    build_state_response(row, dev_visual).map(Json)
 }
 
 pub async fn mark_cell(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(game_id): Path<String>,
     Json(payload): Json<CellActionRequest>,
 ) -> Result<Json<GameStateResponse>, ApiError> {
@@ -210,9 +222,10 @@ pub async fn mark_cell(
     let mut board: Vec<Vec<CellDto>> = serde_json::from_value(row.board.clone()).map_err(internal_error)?;
     let settings: GameSettingsDto = serde_json::from_value(row.settings.clone()).map_err(internal_error)?;
     let status = parse_status(&row.game_status);
+    let dev_visual = resolved_dev_visual(&headers, &state.jwt_secret, settings.dev_mode);
 
     if status == GameStatus::Won || status == GameStatus::Lost {
-        return build_state_response(row, settings.dev_mode).map(Json);
+        return build_state_response(row, dev_visual).map(Json);
     }
     if payload.row < 0 || payload.col < 0 || payload.row >= row.rows || payload.col >= row.cols {
         return Err(ApiError::new(StatusCode::BAD_REQUEST, "Invalid cell"));
@@ -235,17 +248,20 @@ pub async fn mark_cell(
 
     persist_game(&state, &game_id, &board, status, row.started_at).await?;
     row = fetch_game(&state, &game_id).await?;
-    build_state_response(row, settings.dev_mode).map(Json)
+    build_state_response(row, dev_visual).map(Json)
 }
 
 pub async fn get_game(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(game_id): Path<String>,
     Query(query): Query<GameStateQuery>,
 ) -> Result<Json<GameStateResponse>, ApiError> {
     let row = fetch_game(&state, &game_id).await?;
-    let dev_mode = query.dev_mode.unwrap_or(false);
-    build_state_response(row, dev_mode).map(Json)
+    let settings: GameSettingsDto = serde_json::from_value(row.settings.clone()).map_err(internal_error)?;
+    let want_visual = settings.dev_mode || query.dev_mode.unwrap_or(false);
+    let dev_visual = want_visual && jwt_allows_dev(&headers, &state.jwt_secret);
+    build_state_response(row, dev_visual).map(Json)
 }
 
 pub async fn delete_game(
@@ -581,6 +597,16 @@ fn build_state_response(row: GameRow, dev_mode: bool) -> Result<GameStateRespons
         seed: row.seed,
         time: now_elapsed(row.started_at),
     })
+}
+
+fn jwt_allows_dev(headers: &HeaderMap, jwt_secret: &str) -> bool {
+    bearer_claims(headers, jwt_secret)
+        .map(|c| role_allows_client_dev(effective_role(&c.role)))
+        .unwrap_or(false)
+}
+
+fn resolved_dev_visual(headers: &HeaderMap, jwt_secret: &str, stored_dev: bool) -> bool {
+    stored_dev && jwt_allows_dev(headers, jwt_secret)
 }
 
 fn optional_user_id(headers: &HeaderMap, jwt_secret: &str) -> Option<String> {
