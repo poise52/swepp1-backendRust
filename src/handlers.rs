@@ -445,8 +445,63 @@ pub async fn get_user_records(
 pub async fn ensure_schema_extensions(state: &AppState) -> Result<(), ApiError> {
     sqlx::query(
         r#"
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            email TEXT NOT NULL,
+            password TEXT NOT NULL,
+            "ratingPts" INTEGER NOT NULL DEFAULT 0,
+            "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        "#,
+    )
+    .execute(&state.db)
+    .await
+    .map_err(internal_error)?;
+
+    sqlx::query(
+        r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS users_email_key ON users (email)
+        "#,
+    )
+    .execute(&state.db)
+    .await
+    .map_err(internal_error)?;
+
+    sqlx::query(
+        r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS users_username_key ON users (username)
+        "#,
+    )
+    .execute(&state.db)
+    .await
+    .map_err(internal_error)?;
+
+    sqlx::query(
+        r#"
         ALTER TABLE users
         ADD COLUMN IF NOT EXISTS "ratingPts" INTEGER NOT NULL DEFAULT 0
+        "#,
+    )
+    .execute(&state.db)
+    .await
+    .map_err(internal_error)?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS game_records (
+            id TEXT PRIMARY KEY,
+            "userId" TEXT NOT NULL,
+            difficulty TEXT NOT NULL,
+            rows INTEGER NOT NULL,
+            cols INTEGER NOT NULL,
+            mines INTEGER NOT NULL,
+            time INTEGER NOT NULL,
+            seed INTEGER NOT NULL,
+            won BOOLEAN NOT NULL,
+            "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
         "#,
     )
     .execute(&state.db)
