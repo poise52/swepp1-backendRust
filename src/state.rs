@@ -12,6 +12,10 @@ pub struct AppState {
     pub db: PgPool,
     pub jwt_secret: String,
     pub jwt_exp_seconds: u64,
+    /// Если задан (env `FRONTEND_URL`) — используется для invite и строгого CORS.
+    pub configured_public_url: Option<String>,
+    /// Когда `FRONTEND_URL` нет и из запроса база не выведена — как на dev (Vite).
+    pub invite_fallback: String,
     pub rate_limit: Arc<Mutex<RateLimitState>>,
     pub online_hubs: Arc<Mutex<HashMap<String, broadcast::Sender<OnlineEvent>>>>,
 }

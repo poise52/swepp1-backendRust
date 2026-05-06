@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::auth::verify_token;
 use crate::errors::ApiError;
+use crate::public_url::resolve_invite_base_url;
 use crate::minesweeper::{create_empty_board, place_mines_initial, CellDto, GameSettingsDto};
 use crate::state::{AppState, OnlineEvent};
 
@@ -166,7 +167,12 @@ pub async fn create_lobby(
 
     let lobby_id = Uuid::new_v4().to_string();
     let invite_code = generate_invite_code();
-    let invite_link = format!("{}?invite={invite_code}", "http://localhost:5173");
+    let public_base = resolve_invite_base_url(
+        &headers,
+        &state.configured_public_url,
+        &state.invite_fallback,
+    );
+    let invite_link = format!("{}/?invite={invite_code}", public_base.trim_end_matches('/'));
     let seed = if payload.mode == "ranked" {
         derive_ranked_seed(&lobby_id)
     } else {
