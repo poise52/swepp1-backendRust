@@ -26,6 +26,13 @@ pub async fn rate_limit(
     request: Request,
     next: Next,
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
+    if std::env::var("DISABLE_RATE_LIMIT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return Ok(next.run(request).await);
+    }
+
     let path = request.uri().path().to_string();
     let ip = connect_info
         .map(|ci| ci.0.ip().to_string())
@@ -50,6 +57,9 @@ pub async fn rate_limit(
         ("minesweeper_mark", MINESWEEPER_MARK_RATE_LIMIT_MAX)
     } else if path.starts_with("/api/minesweeper/") {
         ("minesweeper_other", MINESWEEPER_OTHER_RATE_LIMIT_MAX)
+    } else if path.starts_with("/api/online/") {
+        // Online create/join/ready/start/move would hit the default bucket very fast.
+        ("online", 250_000)
     } else {
         ("default", RATE_LIMIT_MAX)
     };

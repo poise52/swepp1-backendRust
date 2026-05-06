@@ -285,7 +285,7 @@ pub async fn ensure_minesweeper_schema(state: &AppState) -> Result<(), ApiError>
     Ok(())
 }
 
-fn create_empty_board(rows: i32, cols: i32) -> Vec<Vec<CellDto>> {
+pub(crate) fn create_empty_board(rows: i32, cols: i32) -> Vec<Vec<CellDto>> {
     let mut board = vec![];
     for r in 0..rows {
         let mut row = vec![];
@@ -315,7 +315,7 @@ fn create_seeded_random(seed: i32) -> impl FnMut() -> f64 {
     }
 }
 
-fn place_mines_initial(board: &mut [Vec<CellDto>], rows: i32, cols: i32, mines: i32, seed: i32) {
+pub(crate) fn place_mines_initial(board: &mut [Vec<CellDto>], rows: i32, cols: i32, mines: i32, seed: i32) {
     let mut positions = vec![];
     for r in 0..rows {
         for c in 0..cols {

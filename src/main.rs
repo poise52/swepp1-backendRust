@@ -4,6 +4,7 @@ mod errors;
 mod handlers;
 mod middleware;
 mod minesweeper;
+mod online;
 mod state;
 
 use std::net::SocketAddr;
@@ -26,6 +27,10 @@ use crate::middleware::rate_limit;
 use crate::minesweeper::{
     create_game, delete_game, ensure_minesweeper_schema, get_game, mark_cell, reveal_cell,
 };
+use crate::online::{
+    create_lobby, ensure_online_schema, finish_match, get_lobby, get_opponent_state, join_lobby, set_ready,
+    start_lobby_match, submit_match_move, ws_lobby,
+};
 use crate::state::{AppState, RateLimitState};
 
 #[tokio::main]
@@ -43,11 +48,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         jwt_secret: config.jwt_secret,
         jwt_exp_seconds: config.jwt_expires_in_seconds,
         rate_limit: Arc::new(tokio::sync::Mutex::new(RateLimitState::new())),
+        online_hubs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
     if let Err(err) = ensure_schema_extensions(&state).await {
         return Err(std::io::Error::other(err.body.to_string()).into());
     }
     if let Err(err) = ensure_minesweeper_schema(&state).await {
+        return Err(std::io::Error::other(err.body.to_string()).into());
+    }
+    if let Err(err) = ensure_online_schema(&state).await {
         return Err(std::io::Error::other(err.body.to_string()).into());
     }
 
@@ -85,12 +94,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/games/:gameId", get(get_game).delete(delete_game))
         .route("/games/:gameId/reveal", post(reveal_cell))
         .route("/games/:gameId/mark", post(mark_cell));
+    let online_routes = Router::new()
+        .route("/lobbies", post(create_lobby))
+        .route("/lobbies/join", post(join_lobby))
+        .route("/lobbies/:lobbyId", get(get_lobby))
+        .route("/lobbies/:lobbyId/ready", post(set_ready))
+        .route("/lobbies/:lobbyId/start", post(start_lobby_match))
+        .route("/lobbies/:lobbyId/ws", get(ws_lobby))
+        .route("/matches/:matchId/moves", post(submit_match_move))
+        .route("/matches/:matchId/finish", post(finish_match))
+        .route("/matches/:matchId/opponent-state", get(get_opponent_state));
 
     let app = Router::new()
         .route("/health", get(health))
         .nest("/api/auth", auth_routes)
         .nest("/api/records", records_routes)
         .nest("/api/minesweeper", minesweeper_routes)
+        .nest("/api/online", online_routes)
         .layer(from_fn_with_state(state.clone(), rate_limit))
         .layer(cors)
         .with_state(state);
