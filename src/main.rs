@@ -17,7 +17,10 @@ use sqlx::postgres::PgPoolOptions;
 use tower_http::cors::CorsLayer;
 
 use crate::config::Config;
-use crate::handlers::{get_current_user, health, login, logout, register};
+use crate::handlers::{
+    create_record, ensure_schema_extensions, get_current_user, get_records, get_user_records, health, login, logout,
+    register,
+};
 use crate::middleware::rate_limit;
 use crate::state::{AppState, RateLimitState};
 
@@ -37,6 +40,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         jwt_exp_seconds: config.jwt_expires_in_seconds,
         rate_limit: Arc::new(tokio::sync::Mutex::new(RateLimitState::new())),
     };
+    if let Err(err) = ensure_schema_extensions(&state).await {
+        return Err(std::io::Error::other(err.body.to_string()).into());
+    }
 
     let mut origins = vec![
         HeaderValue::from_static("http://localhost:5173"),
@@ -59,10 +65,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/login", post(login))
         .route("/logout", post(logout))
         .route("/me", get(get_current_user));
+    let records_routes = Router::new()
+        .route("/", post(create_record).get(get_records))
+        .route("/user/:userId", get(get_user_records));
 
     let app = Router::new()
         .route("/health", get(health))
         .nest("/api/auth", auth_routes)
+        .nest("/api/records", records_routes)
         .layer(from_fn_with_state(state.clone(), rate_limit))
         .layer(cors)
         .with_state(state);
