@@ -5,7 +5,7 @@ use bcrypt::{hash, verify, DEFAULT_COST};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::FromRow;
+use sqlx::{FromRow, Row};
 use uuid::Uuid;
 use validator::Validate;
 
@@ -521,6 +521,42 @@ pub async fn ensure_schema_extensions(state: &AppState) -> Result<(), ApiError> 
     .await
     .map_err(internal_error)?;
 
+    // Старые инсталляции могли иметь TIMESTAMP вместо TIMESTAMPTZ — sqlx ждёт TIMESTAMPTZ ↔ DateTime<Utc>.
+    for stmt in [
+        r#"
+        ALTER TABLE users
+          ALTER COLUMN "createdAt" TYPE TIMESTAMPTZ
+          USING (
+            CASE pg_typeof("createdAt")::text
+              WHEN 'timestamp without time zone' THEN "createdAt" AT TIME ZONE 'UTC'
+              ELSE "createdAt"::timestamptz
+            END
+          )
+        "#,
+        r#"
+        ALTER TABLE users
+          ALTER COLUMN "updatedAt" TYPE TIMESTAMPTZ
+          USING (
+            CASE pg_typeof("updatedAt")::text
+              WHEN 'timestamp without time zone' THEN "updatedAt" AT TIME ZONE 'UTC'
+              ELSE "updatedAt"::timestamptz
+            END
+          )
+        "#,
+        r#"
+        ALTER TABLE game_records
+          ALTER COLUMN "createdAt" TYPE TIMESTAMPTZ
+          USING (
+            CASE pg_typeof("createdAt")::text
+              WHEN 'timestamp without time zone' THEN "createdAt" AT TIME ZONE 'UTC'
+              ELSE "createdAt"::timestamptz
+            END
+          )
+        "#,
+    ] {
+        sqlx::query(stmt).execute(&state.db).await.map_err(internal_error)?;
+    }
+
     Ok(())
 }
 
@@ -542,9 +578,9 @@ fn extract_user_id(headers: &HeaderMap, jwt_secret: &str) -> Result<String, ApiE
 }
 
 async fn fetch_world_rank(state: &AppState, user_id: &str, rating_pts: i32) -> Result<i64, ApiError> {
-    let higher_count = sqlx::query_scalar::<_, i64>(
+    let row = sqlx::query(
         r#"
-        SELECT (COUNT(*))::BIGINT FROM users
+        SELECT COUNT(*) AS c FROM users
         WHERE "ratingPts" > $1
            OR ("ratingPts" = $1 AND id < $2)
         "#,
@@ -555,7 +591,21 @@ async fn fetch_world_rank(state: &AppState, user_id: &str, rating_pts: i32) -> R
     .await
     .map_err(internal_error)?;
 
+    let higher_count: i64 = decode_count_column(&row, "c")?;
     Ok(higher_count + 1)
+}
+
+/// Postgres может отдать COUNT как int4 или int8 в зависимости от версии/клиента.
+fn decode_count_column(row: &sqlx::postgres::PgRow, alias: &str) -> Result<i64, ApiError> {
+    if let Ok(v) = row.try_get::<i64, _>(alias) {
+        return Ok(v);
+    }
+    if let Ok(v) = row.try_get::<i32, _>(alias) {
+        return Ok(i64::from(v));
+    }
+    row.try_get::<i16, _>(alias)
+        .map(|v| i64::from(v))
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("rank count decode: {e}")))
 }
 
 fn internal_error<E: std::fmt::Display>(error: E) -> ApiError {
